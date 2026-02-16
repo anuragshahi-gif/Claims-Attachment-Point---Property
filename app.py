@@ -7,7 +7,7 @@ import io
 from dateutil import parser
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Attachment Point Assessor", layout="wide")
+st.set_page_config(page_title="Claims Loss Analyzer", layout="wide")
 
 # --- SESSION STATE & RESET LOGIC ---
 if "uploader_key" not in st.session_state:
@@ -28,7 +28,11 @@ def clean_currency(value):
     if isinstance(value, (int, float)):
         return float(value)
     
+    # Remove common currency symbols, commas, and parentheses for negative values
     clean_str = str(value).upper().replace('$', '').replace(',', '').replace('USD', '').strip()
+    if '(' in clean_str and ')' in clean_str:
+        clean_str = '-' + clean_str.replace('(', '').replace(')', '')
+        
     match = re.search(r'-?\d+\.?\d*', clean_str)
     if match:
         try:
@@ -40,6 +44,8 @@ def clean_currency(value):
 def parse_date_find_year(date_str):
     """Attempts to parse a date string and return the year."""
     try:
+        if pd.isna(date_str) or str(date_str).strip() == "":
+            return None
         dt = parser.parse(str(date_str), fuzzy=True)
         return dt.year
     except:
@@ -88,8 +94,11 @@ def parse_pasted_text(text):
 
 # --- FRONTEND UI ---
 
-st.title("🛡️ Attachment Point & Policy Checker")
-st.markdown("Checks data against an **Attachment Point** and finds the **Oldest Policy Year**.")
+st.title("📊 Claims Loss Analyzer & Summarizer")
+st.markdown("""
+* **Mode 1: Large Loss Filter** (Enter an Attachment Point > 0)
+* **Mode 2: Loss Summary by Year** (Enter Attachment Point = 0)
+""")
 
 # 1. Attachment Point Input
 attachment_point = st.number_input(
@@ -98,25 +107,29 @@ attachment_point = st.number_input(
     value=0.0, 
     step=1000.0,
     format="%.2f",
-    help="Rows with values GREATER than this will be flagged."
+    help="Set to 0 to generate a Summary by Year. Set > 0 to filter specific large claims."
 )
+
+if attachment_point == 0:
+    st.info("ℹ️ Attachment Point is 0. **Summary Mode** is active.")
+else:
+    st.info(f"ℹ️ Filtering claims greater than **${attachment_point:,.2f}**.")
 
 # 2. Input Method Selection & Reset Button
 col_input, col_reset = st.columns([4, 1])
-
 with col_input:
     input_method = st.radio("Data Source:", ["Upload File", "Paste Text"], horizontal=True)
-
 with col_reset:
-    st.write("") # Spacer
-    st.write("") # Spacer
-    st.button("🔄 Reset All Data", on_click=reset_all, type="secondary")
+    st.write("") 
+    st.write("") 
+    st.button("🔄 Reset", on_click=reset_all, type="secondary")
 
 df = pd.DataFrame()
-target_col_index = None
 policy_col_index = None
+incurred_col_index = None
+paid_col_index = None
 
-# 3 & 4. Logic based on Input Method
+# 3. Logic based on Input Method
 if input_method == "Upload File":
     uploaded_file = st.file_uploader(
         "Upload Excel, CSV, PDF, or Word", 
@@ -127,62 +140,111 @@ if input_method == "Upload File":
     if uploaded_file:
         df = extract_data_from_file(uploaded_file)
         if not df.empty:
-            st.info(f"File loaded: {len(df)} rows, {len(df.columns)} columns.")
+            st.success(f"Loaded {len(df)} rows.")
             st.dataframe(df.head(3))
             
-            c1, c2 = st.columns(2)
+            # Column Selectors
+            c1, c2, c3 = st.columns(3)
             with c1:
-                val_col_num = st.number_input("Column # for Value/Claim:", min_value=1, max_value=len(df.columns), value=1)
-                target_col_index = val_col_num - 1
+                p_idx = st.number_input("Col # for Policy/Date:", min_value=1, max_value=len(df.columns), value=1)
+                policy_col_index = p_idx - 1
             with c2:
-                policy_col_num = st.number_input("Column # for Policy/Date:", min_value=1, max_value=len(df.columns), value=1)
-                policy_col_index = policy_col_num - 1
+                i_idx = st.number_input("Col # for Total Incurred:", min_value=1, max_value=len(df.columns), value=1)
+                incurred_col_index = i_idx - 1
+            with c3:
+                p_idx_paid = st.number_input("Col # for Total Paid:", min_value=1, max_value=len(df.columns), value=1)
+                paid_col_index = p_idx_paid - 1
 
 elif input_method == "Paste Text":
-    raw_text = st.text_area("Paste Data (Copy from Excel/CSV):", height=200, key="text_input")
-    
+    raw_text = st.text_area("Paste Data:", height=200, key="text_input")
     if raw_text:
         df = parse_pasted_text(raw_text)
         if not df.empty:
-            st.success("Text parsed successfully.")
+            st.success("Text parsed.")
             st.dataframe(df.head(3))
-            target_col_name = st.selectbox("Select Value Column:", df.columns)
-            policy_col_name = st.selectbox("Select Policy/Date Column:", df.columns)
-            if target_col_name: target_col_index = df.columns.get_loc(target_col_name)
-            if policy_col_name: policy_col_index = df.columns.get_loc(policy_col_name)
+            
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                pol_name = st.selectbox("Policy/Date Col:", df.columns, index=0)
+                if pol_name: policy_col_index = df.columns.get_loc(pol_name)
+            with c2:
+                inc_name = st.selectbox("Total Incurred Col:", df.columns, index=0)
+                if inc_name: incurred_col_index = df.columns.get_loc(inc_name)
+            with c3:
+                paid_name = st.selectbox("Total Paid Col:", df.columns, index=0)
+                if paid_name: paid_col_index = df.columns.get_loc(paid_name)
 
-# 5, 6 & 7. Processing Logic
+# 4. Processing Logic
 if st.button("Analyze Data", type="primary"):
     if df.empty:
-        st.warning("No data found to analyze.")
-    elif target_col_index is None:
-        st.warning("Please specify columns.")
+        st.warning("No data found.")
+    elif None in [policy_col_index, incurred_col_index, paid_col_index]:
+        st.warning("Please specify all three columns (Policy Date, Incurred, Paid).")
     else:
-        # Filter Logic
-        target_col_name = df.columns[target_col_index]
-        df['__clean_value__'] = df[target_col_name].apply(clean_currency)
-        filtered_df = df[df['__clean_value__'] >= attachment_point].copy()
-        
-        # Date Logic
-        oldest_year = "N/A"
-        if policy_col_index is not None:
-            policy_col_name = df.columns[policy_col_index]
-            df['__parsed_year__'] = df[policy_col_name].apply(parse_date_find_year)
-            sorted_by_date = df.sort_values(by='__parsed_year__', ascending=True)
-            min_year_row = sorted_by_date[sorted_by_date['__parsed_year__'].notnull()].head(1)
-            if not min_year_row.empty:
-                oldest_year = int(min_year_row['__parsed_year__'].iloc[0])
+        # Get Column Names
+        col_policy = df.columns[policy_col_index]
+        col_incurred = df.columns[incurred_col_index]
+        col_paid = df.columns[paid_col_index]
 
-        # Display
+        # Clean Data
+        # 1. Parse Years
+        df['__Year__'] = df[col_policy].apply(parse_date_find_year)
+        # 2. Clean Currency
+        df['__Incurred__'] = df[col_incurred].apply(clean_currency)
+        df['__Paid__'] = df[col_paid].apply(clean_currency)
+        
+        # Remove rows where Year could not be determined
+        df_clean = df.dropna(subset=['__Year__']).copy()
+        df_clean['__Year__'] = df_clean['__Year__'].astype(int)
+
         st.divider()
-        st.subheader("Analysis Results")
-        
-        m1, m2 = st.columns(2)
-        m1.metric("Oldest Policy Year", str(oldest_year))
-        m2.metric("Rows Exceeding Limit", len(filtered_df))
-        
-        if not filtered_df.empty:
-            display_df = filtered_df.drop(columns=['__clean_value__', '__parsed_year__'], errors='ignore')
-            st.dataframe(display_df)
+
+        # --- MODE 1: SUMMARY BY YEAR (Attachment Point = 0) ---
+        if attachment_point == 0:
+            st.subheader("📑 Loss Summary by Policy Year")
+            
+            # Group by Year and Calculate Stats
+            summary = df_clean.groupby('__Year__').agg(
+                Claims_Count=('__Year__', 'count'),
+                Total_Incurred=('__Incurred__', 'sum'),
+                Total_Paid=('__Paid__', 'sum')
+            ).reset_index()
+            
+            # Rename columns to match user request
+            summary.columns = ['Policy Year', '# of Claims', 'Total Incurred', 'Total Paid']
+            
+            # Sort Descending by Year
+            summary = summary.sort_values(by='Policy Year', ascending=False)
+            
+            # Format numbers for display (optional, but looks nicer)
+            # We use a display copy so we don't break the underlying numbers for download
+            display_summary = summary.copy()
+            display_summary['Total Incurred'] = display_summary['Total Incurred'].apply(lambda x: f"${x:,.2f}")
+            display_summary['Total Paid'] = display_summary['Total Paid'].apply(lambda x: f"${x:,.2f}")
+            
+            st.dataframe(display_summary, hide_index=True, use_container_width=True)
+            
+            # Metric Totals
+            t1, t2, t3 = st.columns(3)
+            t1.metric("Grand Total Claims", f"{summary['# of Claims'].sum()}")
+            t2.metric("Grand Total Incurred", f"${summary['Total Incurred'].sum():,.2f}")
+            t3.metric("Grand Total Paid", f"${summary['Total Paid'].sum():,.2f}")
+
+        # --- MODE 2: FILTER BY ATTACHMENT POINT (Attachment Point > 0) ---
         else:
-            st.info("No records found exceeding the attachment point.")
+            st.subheader(f"⚠️ Claims Exceeding ${attachment_point:,.2f}")
+            
+            filtered_df = df_clean[df_clean['__Incurred__'] >= attachment_point].copy()
+            
+            if not filtered_df.empty:
+                st.write(f"Found **{len(filtered_df)}** claims.")
+                
+                # Show oldest policy year among these specific large claims
+                oldest_year = filtered_df['__Year__'].min()
+                st.metric("Oldest Policy Year (in filtered set)", str(oldest_year))
+                
+                # Cleanup for display
+                display_cols = [col for col in df.columns if col not in ['__Year__', '__Incurred__', '__Paid__']]
+                st.dataframe(filtered_df[display_cols])
+            else:
+                st.success("No claims found exceeding this attachment point.")
