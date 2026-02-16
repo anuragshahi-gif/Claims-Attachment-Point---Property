@@ -66,4 +66,5 @@ def extract_data_from_file(uploaded_file):
                             if any(row): all_rows.append(row)
                 if all_rows:
                     df = pd.DataFrame(all_rows[1:], columns=all_rows[0])
+
         elif filename
